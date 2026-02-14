@@ -1,0 +1,55 @@
+{
+  "timestamp": "2026-02-03T22:15:29.484857",
+  "data": {
+    "timestamp": "2026-02-03T22:15:29.468288",
+    "critical_files": {
+      "user_holdings.json": {
+        "exists": true,
+        "size": 427,
+        "mtime": 1770124570.2129827
+      },
+      "position_management.json": {
+        "exists": true,
+        "size": 2916,
+        "mtime": 1770124707.5838418
+      },
+      "HEARTBEAT.md": {
+        "exists": true,
+        "size": 868,
+        "mtime": 1770126855.969328
+      },
+      "SOUL.md": {
+        "exists": true,
+        "size": 2016,
+        "mtime": 1770125923.1614757
+      },
+      "IDENTITY.md": {
+        "exists": true,
+        "size": 663,
+        "mtime": 1770125936.4804602
+      },
+      "kk_state.json": {
+        "exists": true,
+        "size": 4577,
+        "mtime": 1770127149.8629632
+      }
+    },
+    "processes": {
+      "total_lines": 118,
+      "relevant_count": 0,
+      "sample": []
+    },
+    "disk_space": {
+      "total_gb": 39.94,
+      "used_gb": 12.13,
+      "free_gb": 27.8,
+      "percent_used": 30.4
+    },
+    "memory_usage": {
+      "total_mb": 1963,
+      "free_mb": 139,
+      "available_mb": 746
+    },
+    "last_heartbeat": 1770128129.4846277
+  }
+}

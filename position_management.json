@@ -1,0 +1,114 @@
+{
+  "total_assets": 70176,
+  "current_position": {
+    "蓝色光标": {
+      "shares": 600,
+      "cost": 18.744,
+      "market_value": 11246.4,
+      "percentage": 16.03
+    },
+    "网宿科技": {
+      "shares": 600,
+      "cost": 16.984,
+      "market_value": 10190.4,
+      "percentage": 14.52
+    },
+    "宏景科技": {
+      "shares": 100,
+      "cost": 101.985,
+      "market_value": 10198.5,
+      "percentage": 14.53
+    },
+    "信维通信": {
+      "shares": 100,
+      "cost": 87.061,
+      "market_value": 8706.1,
+      "percentage": 12.41
+    }
+  },
+  "position_summary": {
+    "total_invested": 40341.9,
+    "total_percentage": 57.49,
+    "cash_available": 29834.1,
+    "cash_percentage": 42.51,
+    "stocks_count": 4,
+    "avg_position_percentage": 14.37
+  },
+  "recommendations": {
+    "risk_level": "中等",
+    "suggested_position": "60-70%",
+    "max_single_position": "20%",
+    "sector_diversification": "需要加强",
+    "market_cap_diversification": "需要加强"
+  },
+  "allocation_plan": {
+    "current_allocation": [
+      {
+        "stock": "蓝色光标",
+        "current_percent": 16.03,
+        "suggested_range": "10-15%",
+        "action": "可适量减仓"
+      },
+      {
+        "stock": "网宿科技",
+        "current_percent": 14.52,
+        "suggested_range": "10-15%",
+        "action": "适中"
+      },
+      {
+        "stock": "宏景科技",
+        "current_percent": 14.53,
+        "suggested_range": "5-10%",
+        "action": "可适量减仓"
+      },
+      {
+        "stock": "信维通信",
+        "current_percent": 12.41,
+        "suggested_range": "10-15%",
+        "action": "适中"
+      }
+    ],
+    "available_cash_allocation": [
+      {
+        "category": "防御性板块",
+        "suggested_percent": "10-15%",
+        "amount": "7018-10526",
+        "suggestions": ["银行", "消费", "医药"]
+      },
+      {
+        "category": "成长性板块",
+        "suggested_percent": "15-20%",
+        "amount": "10526-14035",
+        "suggestions": ["新能源", "半导体", "人工智能"]
+      },
+      {
+        "category": "现金储备",
+        "suggested_percent": "10-15%",
+        "amount": "7018-10526",
+        "purpose": "机动资金，等待机会"
+      }
+    ]
+  },
+  "risk_management": {
+    "stop_loss_levels": {
+      "蓝色光标": "15.00 (-20%)",
+      "网宿科技": "13.59 (-20%)",
+      "宏景科技": "81.59 (-20%)",
+      "信维通信": "69.65 (-20%)"
+    },
+    "take_profit_levels": {
+      "蓝色光标": "22.49 (+20%)",
+      "网宿科技": "20.38 (+20%)",
+      "宏景科技": "122.38 (+20%)",
+      "信维通信": "104.47 (+20%)"
+    },
+    "max_drawdown_limit": "-15%",
+    "single_day_loss_limit": "-5%"
+  },
+  "rebalancing_strategy": {
+    "rebalance_frequency": "每月一次",
+    "rebalance_threshold": "±5%",
+    "next_rebalance_date": "2026-03-01",
+    "method": "定期再平衡"
+  }
+}

@@ -1,0 +1,121 @@
+{
+  "version": 1,
+  "skills": {
+    "focus-deep-work": {
+      "version": "1.0.0",
+      "installedAt": 1770023912664
+    },
+    "skill-email-management": {
+      "version": "1.0.0",
+      "installedAt": 1770023918472
+    },
+    "cursor-agent": {
+      "version": "2.1.0",
+      "installedAt": 1770023945907
+    },
+    "cli-developer": {
+      "version": "0.1.0",
+      "installedAt": 1770023958557
+    },
+    "search": {
+      "version": "1.0.0",
+      "installedAt": 1770023970212
+    },
+    "perplexity": {
+      "version": "1.0.0",
+      "installedAt": 1770023975985
+    },
+    "obsidian-daily": {
+      "version": "1.2.1",
+      "installedAt": 1770024093568
+    },
+    "task": {
+      "version": "0.1.0",
+      "installedAt": 1770024106935
+    },
+    "claude": {
+      "version": "1.1.0",
+      "installedAt": 1770025582520
+    },
+    "claude-code-usage": {
+      "version": "1.2.0",
+      "installedAt": 1770025590981
+    },
+    "claude-code-wingman": {
+      "version": "0.3.0",
+      "installedAt": 1770025608102
+    },
+    "github": {
+      "version": "1.0.0",
+      "installedAt": 1770026299404
+    },
+    "calendar": {
+      "version": "1.0.0",
+      "installedAt": 1770026320413
+    },
+    "fabric-api": {
+      "version": "1.0.0",
+      "installedAt": 1770026335852
+    },
+    "deepread-ocr": {
+      "version": "1.0.1",
+      "installedAt": 1770121628585
+    },
+    "stock-market-pro": {
+      "version": "1.1.0",
+      "installedAt": 1770126115491
+    },
+    "stock-analysis": {
+      "version": "6.2.0",
+      "installedAt": 1770126124916
+    },
+    "portfolio-watcher": {
+      "version": "1.0.0",
+      "installedAt": 1770126134219
+    },
+    "trading-coach": {
+      "version": "1.0.0",
+      "installedAt": 1770126144279
+    },
+    "duckduckgo-search": {
+      "version": "1.0.0",
+      "installedAt": 1770374088264
+    },
+    "baidu-search": {
+      "version": "1.0.1",
+      "installedAt": 1770374091124
+    },
+    "google-search": {
+      "version": "1.0.0",
+      "installedAt": 1770374093525
+    },
+    "stock-watcher": {
+      "version": "1.0.0",
+      "installedAt": 1770374099536
+    },
+    "todo": {
+      "version": "1.1.0",
+      "installedAt": 1770374103069
+    },
+    "code-explainer": {
+      "version": "1.0.0",
+      "installedAt": 1770374107252
+    },
+    "obsidian": {
+      "version": "1.0.0",
+      "installedAt": 1770374109543
+    },
+    "file-search": {
+      "version": "1.0.0",
+      "installedAt": 1770374114362
+    },
+    "daily-briefing": {
+      "version": "1.0.3",
+      "installedAt": 1770374117207
+    },
+    "ai-explain": {
+      "version": "1.0.1",
+      "installedAt": 1770378593817
+    }
+  }
+}
