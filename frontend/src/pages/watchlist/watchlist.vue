@@ -57,12 +57,17 @@
           <text class="close-btn" @tap="showAddModal = false">×</text>
         </view>
         <view class="modal-body">
-          <input
-            class="search-input"
-            v-model="searchKeyword"
-            placeholder="输入股票代码或名称"
-            @input="onSearchInput"
-          />
+          <view class="search-row">
+            <input
+              class="search-input"
+              v-model="searchKeyword"
+              placeholder="输入股票代码或名称"
+              @confirm="onSearch"
+            />
+            <view class="search-btn" @tap="onSearch">
+              <text>搜索</text>
+            </view>
+          </view>
           <view class="search-results" v-if="searchResults.length > 0">
             <view
               class="result-item"
@@ -126,14 +131,14 @@ const getChangeClass = (change?: number) => {
   return change > 0 ? 'text-success' : 'text-danger'
 }
 
-const onSearchInput = async () => {
-  if (!searchKeyword.value) {
+const onSearch = async () => {
+  if (!searchKeyword.value.trim()) {
     searchResults.value = []
     return
   }
   try {
     // 调用搜索 API
-    const res = await watchlistStore.searchStocks(searchKeyword.value)
+    const res = await watchlistStore.searchStocks(searchKeyword.value.trim())
     searchResults.value = res.data || []
   } catch (error) {
     console.error('搜索失败:', error)
@@ -307,12 +312,28 @@ const selectStock = async (stock: StockItem) => {
   padding: 16px;
 }
 
+.search-row {
+  display: flex;
+  gap: 8px;
+}
+
 .search-input {
-  width: 100%;
+  flex: 1;
   padding: 12px;
   border: 1px solid #ddd;
   border-radius: 4px;
   font-size: 14px;
+}
+
+.search-btn {
+  padding: 12px 16px;
+  background: #1976d2;
+  border-radius: 4px;
+  color: #fff;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .search-results {
