@@ -1,0 +1,54 @@
+{
+  "pages": [
+    {
+      "path": "pages/watchlist/watchlist",
+      "type": "home",
+      "style": {
+        "navigationBarTitleText": "自选股",
+        "enablePullDownRefresh": true
+      }
+    },
+    {
+      "path": "pages/market/market",
+      "style": {
+        "navigationBarTitleText": "市场热点",
+        "enablePullDownRefresh": true
+      }
+    }
+  ],
+  "globalStyle": {
+    "navigationBarTextStyle": "black",
+    "navigationBarTitleText": "智投助手",
+    "navigationBarBackgroundColor": "#FFFFFF",
+    "backgroundColor": "#F5F5F5"
+  },
+  "tabBar": {
+    "color": "#757575",
+    "selectedColor": "#1976D2",
+    "backgroundColor": "#FFFFFF",
+    "borderStyle": "black",
+    "list": [
+      {
+        "pagePath": "pages/watchlist/watchlist",
+        "text": "自选股"
+      },
+      {
+        "pagePath": "pages/market/market",
+        "text": "市场热点"
+      }
+    ]
+  },
+  "condition": {
+    "current": 0,
+    "list": [
+      {
+        "name": "自选股",
+        "path": "pages/watchlist/watchlist"
+      },
+      {
+        "name": "市场热点",
+        "path": "pages/market/market"
+      }
+    ]
+  }
+}
