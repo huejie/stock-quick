@@ -1,0 +1,1050 @@
+#!/usr/bin/env python3
+"""
+GitLab Webhook接收服务
+用于接收GitLab的push、merge request等事件，并进行代码审查
+- 接收MR事件
+- 获取代码diff
+- 通过Claude Code进行代码审查
+- 将审查结果发送到飞书
+- 自动回复到GitLab MR评论区
+"""
+
+from fastapi import FastAPI, Request, Header, HTTPException
+from fastapi.responses import JSONResponse
+import uvicorn
+import hmac
+import hashlib
+import json
+import os
+import requests
+from datetime import datetime
+import logging
+from pathlib import Path
+import subprocess
+import time
+import re
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# 创建FastAPI应用
+app = FastAPI(title="GitLab Webhook Receiver", version="2.0.0")
+
+# Webhook Secret (建议从环境变量读取）
+WEBHOOK_SECRET = None
+LOG_FILE = Path("/root/.openclaw/workspace/webhook-logs.jsonl")
+
+# 飞书通知目标
+FEISHU_TARGET_USER = "ou_032db2f8e45df3e207b2ea3a0563df9c"
+
+# GitLab配置
+GITLAB_URL = "https://git.iec.io"
+GITLAB_TOKEN = "glpat-hO7Kq5QZ-F_5pHpbWsNG9W86MQp1OjJuMgk.01.0z0zuoear"
+
+def verify_signature(payload: bytes, signature: str, secret: str) -> bool:
+    """验证GitLab webhook签名"""
+    if not secret:
+        return True
+
+    hash_obj = hmac.new(secret.encode('utf-8'), payload, hashlib.sha1)
+    expected_signature = f"sha1={hash_obj.hexdigest()}"
+    return hmac.compare_digest(signature, expected_signature)
+
+def log_webhook(event_type: str, data: dict):
+    """记录webhook事件到日志文件"""
+    log_entry = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "event_type": event_type,
+        "data": data
+    }
+    with open(LOG_FILE, 'a', encoding='utf-8') as f:
+        f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
+
+@app.get("/")
+async def root():
+    """健康检查端点"""
+    return {
+        "status": "running",
+        "service": "GitLab Webhook Receiver with Auto Code Review",
+        "version": "2.0.0",
+        "features": [
+            "接收GitLab webhook事件",
+            "自动获取MR diff",
+            "AI代码审查",
+            "飞书通知",
+            "自动回复到GitLab MR评论区"
+        ],
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+@app.post("/webhook/gitlab")
+async def handle_gitlab_webhook(
+    request: Request,
+    x_gitlab_token: str = Header(None),
+    x_gitlab_event: str = Header(None)
+):
+    """处理GitLab webhook请求"""
+    try:
+        payload = await request.body()
+        data = await request.json()
+
+        # 验证签名（如果配置了secret）
+        if WEBHOOK_SECRET and x_gitlab_token:
+            if not verify_signature(payload, x_gitlab_token, WEBHOOK_SECRET):
+                logger.warning("Invalid webhook signature")
+                raise HTTPException(status_code=403, detail="Invalid signature")
+
+        # 获取事件类型
+        event_type = x_gitlab_event or data.get('object_kind', 'Unknown')
+
+        logger.info(f"Received webhook: {event_type}")
+
+        # 记录webhook事件
+        log_webhook(event_type, data)
+
+        # 根据事件类型处理
+        if event_type == "Push Hook":
+            await handle_push_event(data)
+        elif event_type == "Merge Request Hook":
+            await handle_merge_request_event(data)
+        elif event_type == "Tag Push Hook":
+            await handle_tag_push_event(data)
+        elif event_type == "Pipeline Hook":
+            await handle_pipeline_event(data)
+
+        return JSONResponse(
+            status_code=200,
+            content={"status": "success", "message": f"Webhook received: {event_type}"}
+        )
+
+    except json.JSONDecodeError:
+        logger.error("Invalid JSON payload")
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+    except Exception as e:
+        logger.error(f"Error processing webhook: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+def get_gitlab_diff(project_id: int, mr_iid: int) -> str:
+    """获取GitLab MR的代码diff"""
+    try:
+        url = f"{GITLAB_URL}/api/v4/projects/{project_id}/merge_requests/{mr_iid}/diffs"
+        headers = {"PRIVATE-TOKEN": GITLAB_TOKEN}
+
+        response = requests.get(url, headers=headers, timeout=30)
+
+        if response.status_code == 200:
+            diffs = response.json()
+            # 提取所有diff内容
+            diff_text = ""
+            for diff in diffs:
+                diff_text += diff.get('diff', '') + "\n\n"
+
+            # 限制diff长度
+            if len(diff_text) > 6000:
+                diff_text = diff_text[:6000] + "\n\n... (diff已截断，超过6000字符)"
+
+            return diff_text
+        else:
+            logger.error(f"Failed to get diff: {response.status_code}")
+            return None
+
+    except Exception as e:
+        logger.error(f"Error getting diff: {e}")
+        return None
+
+def post_gitlab_mr_comment(project_id: int, mr_iid: int, comment: str) -> bool:
+    """
+    在GitLab MR评论区添加评论
+
+    参数:
+        project_id: 项目ID
+        mr_iid: MR的IID（不是ID）
+        comment: 评论内容
+
+    返回:
+        是否成功
+    """
+    try:
+        url = f"{GITLAB_URL}/api/v4/projects/{project_id}/merge_requests/{mr_iid}/notes"
+        headers = {"PRIVATE-TOKEN": GITLAB_TOKEN}
+
+        data = {
+            "body": comment
+        }
+
+        response = requests.post(url, headers=headers, json=data, timeout=30)
+
+        if response.status_code == 201:
+            logger.info(f"Comment posted to MR {mr_iid} successfully")
+            return True
+        else:
+            logger.error(f"Failed to post comment: {response.status_code} - {response.text}")
+            return False
+
+    except Exception as e:
+        logger.error(f"Error posting MR comment: {e}")
+        return False
+
+def run_claude_code_review(prompt: str) -> str:
+    """
+    使用Claude Code运行代码审查
+
+    参数:
+        prompt: 审查提示词
+
+    返回:
+        审查结果（或None如果失败）
+    """
+    session_name = f"code-review-{int(time.time())}"
+    wingman_cmd = [
+        '/root/code/claude-code-wingman/claude-wingman.sh',
+        '--session', session_name,
+        '--workdir', '/tmp',
+        '--prompt', prompt
+    ]
+
+    try:
+        logger.info(f"Claude Code review started: {session_name}")
+        logger.info(f"Full command: {' '.join(wingman_cmd)}")
+
+        # 直接运行Claude Code，等待完成（90秒超时）
+        process = subprocess.run(
+            wingman_cmd,
+            capture_output=True,
+            text=True,
+            timeout=90
+        )
+
+        logger.info(f"Process returncode: {process.returncode}")
+        logger.info(f"Process timeout: {'yes' if process.returncode is None else 'no'}")
+        
+        # 输出stderr用于调试
+        if process.stderr:
+            logger.error(f"Process stderr: {process.stderr[:500]}")
+
+        if process.returncode == 0:
+            output = process.stdout
+            stderr = process.stderr
+
+            # 添加调试日志
+            logger.info(f"Raw stdout length: {len(output) if output else 0} chars")
+            logger.info(f"Raw stderr length: {len(stderr) if stderr else 0} chars")
+            logger.info(f"Raw stdout preview: {output[:300] if output else 'None'}")
+
+            # 如果stdout为空，尝试使用stderr
+            if not output or len(output.strip()) < 10:
+                if stderr and len(stderr.strip()) > 10:
+                    logger.warning(f"Using stderr as output (stdout empty)")
+                    output = stderr
+                else:
+                    logger.warning(f"Both stdout and stderr are empty or too short")
+                    return f"Claude Code无输出，可能prompt太短或模型响应为空。Stderr: {stderr[:200] if stderr else 'None'}"
+
+            # 过滤掉Claude Code的UI输出，只保留实际内容
+            review_lines = []
+            skip_patterns = [
+                r'Claude Code',
+                r'Welcome',
+                r'Recent activity',
+                r'GLM',
+                r'Tips for',
+                r'─+', r'│', r'╭', r'╯', r'▐', r'▝', r'▘', r'●',
+                r'❯', r'esc', r'model to try', r'\[plugins\]',
+                r'System Prompt', r'You can', r'Started server',
+                r'Waiting for', r'Application startup',
+                r'Uvicorn running', r'Press CTRL',
+                r'\[Wingman\]', r'Attaching', r'Monitor',
+                r'Commands:', r'Attach:', r'Monitor:', r'Kill:',
+                r'Session started'
+            ]
+
+            for line in output.split('\n'):
+                # 跳过UI输出
+                if any(re.search(pattern, line) for pattern in skip_patterns):
+                    continue
+                # 跳过空行和纯符号行
+                if not line.strip() or len(line.strip()) < 5:
+                    continue
+                review_lines.append(line)
+
+            logger.info(f"After filtering: {len(review_lines)} lines, {len(output.split(chr(10)))} total")
+
+            # 提取最后30行有意义的内容
+            review_text = '\n'.join(review_lines[-30:])
+            logger.info(f"Final review text length: {len(review_text)} chars, preview: {review_text[:200]}")
+
+            if review_text.strip():
+                return review_text
+            else:
+                return "审查完成，但未能提取详细内容。"
+        else:
+            logger.error(f"Claude Code failed: {process.stderr}")
+            return f"Claude Code执行失败: {process.stderr}"
+
+    except subprocess.TimeoutExpired:
+        logger.error("Claude Code review timeout")
+        return "审查超时，代码变更较大。"
+    except Exception as e:
+        logger.error(f"Claude Code review error: {e}")
+        return f"审查失败: {str(e)}"
+
+async def code_review(diff: str, mr_title: str, user: str, project: str) -> tuple[str, str]:
+    """
+    使用Claude Code进行代码审查
+
+    参数:
+        diff: 代码diff
+        mr_title: MR标题
+        user: 用户名
+        project: 项目名
+
+    返回:
+        (飞书消息格式, GitLab评论格式)
+    """
+    if not diff:
+        feishu_msg = f"⚠️ **代码审查失败**\n\n无法获取代码diff，跳过审查。"
+        gitlab_comment = "## ⚠️ 代码审查失败\n\n无法获取代码diff，跳过审查。"
+        return feishu_msg, gitlab_comment
+
+    try:
+        # 构造审查提示词（使用用户提供的专业提示词）
+        review_prompt = f"""你是一位资深的企业级代码审查专家，需要对GitLab/Merge Request中的代码进行专业审查。请遵循以下规则输出评论：
+
+1. 评论风格：友好且专业，先肯定优点（如有），再指出问题，最后给出具体可落地的改进方案，避免仅说"代码有问题"
+
+2. 审查优先级：先关注**功能性/安全性/性能**（阻断级问题），再关注**代码风格/可读性/可维护性**（优化级问题）
+
+3. 问题描述：明确指出问题位置（文件+行号）、问题类型、潜在风险、具体修改建议
+
+4. 语言适配：根据代码语言（Python/Java/JS/Go等）使用对应语言的最佳实践
+
+5. 避免无效评论：不纠结于纯格式（如空格/换行），除非影响可读性；不质疑业务逻辑（除非有明显错误），聚焦技术实现
+
+**MR信息：**
+- 项目：{project}
+- 用户：{user}
+- 标题：{mr_title}
+
+**代码diff：**
+```diff
+{diff}
+```
+
+请以结构化的方式输出审查结果，包括：
+- 总体评价（1-2句话）
+- 发现的问题（按优先级排序，每个问题说明位置、类型、风险、建议）
+- 优点（可选）
+
+保持简洁专业，不超过500字。"""
+
+        # 使用Claude Code进行代码审查
+        review_result = run_claude_code_review(review_prompt)
+
+        # 处理审查结果
+        if review_result and review_result != "Claude Code执行超时":
+            # Claude Code成功返回
+            feishu_msg = f"""🔍 **代码审查报告**
+
+📦 项目：{project}
+👤 提交者：{user}
+📋 MR：{mr_title}
+
+---
+
+{review_result}
+
+💡 *本评论由小K的代码审查系统自动生成*"""
+
+            gitlab_comment = f"""## 🔍 AI代码审查
+
+**项目**: {project}  
+**提交者**: {user}  
+**MR**: {mr_title}
+
+---
+
+{review_result}
+
+---
+
+*本评论由小K的代码审查系统自动生成*"""
+
+            return feishu_msg, gitlab_comment
+        else:
+            # Claude Code失败，返回错误信息
+            feishu_msg = f"""📋 **代码审查通知**
+
+📦 项目：{project}
+👤 提交者：{user}
+📋 MR：{mr_title}
+
+⚠️ AI审查服务暂时不可用，请手动进行代码审查。
+
+错误信息：{review_result if review_result else '未知错误'}"""
+
+            gitlab_comment = f"""## 📋 代码审查通知
+
+AI审查服务暂时不可用，请手动进行代码审查。
+
+**错误信息**: {review_result if review_result else '未知错误'}"""
+
+            return feishu_msg, gitlab_comment
+
+    except Exception as e:
+        logger.error(f"Code review error: {e}")
+        feishu_msg = f"⚠️ **代码审查失败**\n\n审查过程中出现错误：{str(e)}"
+        gitlab_comment = f"## ⚠️ 代码审查失败\n\n审查过程中出现错误：{str(e)}"
+        return feishu_msg, gitlab_comment
+        
+        # ===== 安全性检查（阻断级）=====
+        # SQL注入风险
+        if "SELECT *" in diff.upper() and "WHERE" in diff.upper() and "f\"" in diff:
+            blocking_issues.append({
+                "type": "安全性",
+                "issue": "可能的SQL注入风险",
+                "location": "数据库查询代码",
+                "risk": "用户输入直接拼接到SQL语句中，可能导致SQL注入攻击",
+                "suggestion": "使用参数化查询或ORM框架，如：`session.query(User).filter(User.id == user_id)`"
+            })
+        
+        # XSS风险
+        if "innerHTML" in diff or "dangerouslySetInnerHTML" in diff:
+            blocking_issues.append({
+                "type": "安全性",
+                "issue": "XSS跨站脚本攻击风险",
+                "location": "DOM操作代码",
+                "risk": "直接渲染用户输入的HTML可能导致恶意脚本执行",
+                "suggestion": "使用`textContent`替代`innerHTML`，或使用DOMPurify等库进行HTML过滤"
+            })
+        
+        # 敏感信息泄露
+        if any(keyword in diff.lower() for keyword in ["password", "secret", "token", "api_key", "private_key"]):
+            if "=" in diff and any(quote in diff for quote in ['"', "'"]):
+                blocking_issues.append({
+                    "type": "安全性",
+                    "issue": "敏感信息硬编码",
+                    "location": "配置/常量定义",
+                    "risk": "密钥、Token等敏感信息不应硬编码在代码中",
+                    "suggestion": "移到环境变量或配置文件：`const API_KEY = process.env.API_KEY`"
+                })
+        
+        # ===== 性能检查（阻断级）=====
+        # N+1查询问题
+        if "for " in diff and ".find(" in diff and ".all()" in diff:
+            blocking_issues.append({
+                "type": "性能",
+                "issue": "可能的N+1查询问题",
+                "location": "循环中的数据库查询",
+                "risk": "在循环中执行数据库查询会导致性能问题",
+                "suggestion": "使用批量查询或预加载：`User.query.filter(User.id.in_(user_ids)).all()`"
+            })
+        
+        # 大文件上传无限制
+        if "upload" in diff.lower() and "max_size" not in diff.lower():
+            blocking_issues.append({
+                "type": "性能",
+                "issue": "文件上传缺少大小限制",
+                "location": "文件上传处理",
+                "risk": "可能导致服务器资源耗尽",
+                "suggestion": "添加文件大小限制：`maxFileSize: 10 * 1024 * 1024`（10MB）"
+            })
+        
+        # 不必要的循环嵌套
+        if diff.count("for ") > 2 or diff.count("while ") > 1:
+            blocking_issues.append({
+                "type": "性能",
+                "issue": "多层嵌套循环",
+                "location": "循环逻辑",
+                "risk": "时间复杂度可能过高，影响性能",
+                "suggestion": "考虑使用Map/Set优化查找，或重构为单层循环"
+            })
+        
+        # ===== 功能性检查（阻断级）=====
+        # 空指针/未定义检查
+        if any(method in diff for method in [".map(", ".filter(", ".reduce(", ".forEach("]):
+            if "?" not in diff and "null" not in diff and "undefined" not in diff:
+                optimization_issues.append({
+                    "type": "功能性",
+                    "issue": "可能的空值引用",
+                    "location": "数组/对象操作",
+                    "risk": "数据为null/undefined时会导致运行时错误",
+                    "suggestion": "使用可选链：`data?.map(item => ...)` 或添加空值检查"
+                })
+        
+        # Promise未处理
+        if ".then(" in diff and ".catch(" not in diff and "await" not in diff:
+            blocking_issues.append({
+                "type": "功能性",
+                "issue": "Promise错误未处理",
+                "location": "异步代码",
+                "risk": "异步操作失败时可能导致未捕获的Promise rejection",
+                "suggestion": "添加`.catch()`处理错误，或使用`try/catch`包裹await"
+            })
+        
+        # 资源未释放
+        if "open(" in diff or "connect(" in diff:
+            if "close(" not in diff and "finally" not in diff:
+                blocking_issues.append({
+                    "type": "功能性",
+                    "issue": "资源未正确释放",
+                    "location": "文件/网络操作",
+                    "risk": "可能导致资源泄漏",
+                    "suggestion": "使用`with`语句或`try/finally`确保资源释放"
+                })
+        
+        # ===== Vue相关检查 =====
+        if ".vue" in diff:
+            # Vue组件命名
+            if "export default" in diff and "name:" not in diff:
+                optimization_issues.append({
+                    "type": "可维护性",
+                    "issue": "Vue组件缺少name属性",
+                    "location": "组件定义",
+                    "risk": "影响调试和Vue DevTools中的组件识别",
+                    "suggestion": "添加组件name：`export default { name: 'UserProfile', ... }`"
+                })
+            
+            # Props验证
+            if "props:" in diff:
+                if "type:" not in diff and "validator:" not in diff:
+                    optimization_issues.append({
+                        "type": "功能性",
+                        "issue": "Props缺少类型定义",
+                        "location": "Props声明",
+                        "risk": "无法对props进行类型检查，可能导致运行时错误",
+                        "suggestion": "添加Props类型：`props: { userId: { type: String, required: true } }`"
+                    })
+            
+            # :key警告
+            if "v-for" in diff and ":key" not in diff and "v-bind:key" not in diff:
+                blocking_issues.append({
+                    "type": "功能性",
+                    "issue": "v-for缺少:key属性",
+                    "location": "列表渲染",
+                    "risk": "可能导致Vue渲染错误和性能问题",
+                    "suggestion": "添加唯一key：`v-for=\"item in list\" :key=\"item.id\"`"
+                })
+            
+            # computed vs methods
+            if "methods:" in diff and "computed:" in diff:
+                optimization_issues.append({
+                    "type": "性能",
+                    "issue": "可使用computed替代methods",
+                    "location": "方法定义",
+                    "risk": "methods每次调用都会重新计算，computed有缓存",
+                    "suggestion": "对于派生数据，优先使用computed属性以提高性能"
+                })
+            
+            advantages.append("使用了Vue框架，组件化开发")
+        
+        # ===== TypeScript相关检查 =====
+        if ".ts" in diff or ".tsx" in diff:
+            # 类型定义
+            if ": any" in diff or "any[]" in diff:
+                optimization_issues.append({
+                    "type": "代码质量",
+                    "issue": "使用了any类型",
+                    "location": "类型标注",
+                    "risk": "失去TypeScript的类型检查优势",
+                    "suggestion": "使用具体类型或unknown：`const data: unknown = ...`"
+                })
+            
+            if "interface" in diff or "type " in diff:
+                advantages.append("正确定义了TypeScript类型，提高代码健壮性")
+            
+            # 类型导入
+            if "import" in diff and "from" in diff and ".ts" in diff:
+                advantages.append("使用TypeScript开发，类型安全")
+        
+        # ===== React相关检查 =====
+        if ".jsx" in diff or ".tsx" in diff:
+            # Hooks规则
+            if "useEffect" in diff:
+                effect_code = diff.split("useEffect")[1].split("}")[0] if len(diff.split("useEffect")) > 1 else ""
+                if "return" not in effect_code and "cleanup" not in effect_code.lower():
+                    optimization_issues.append({
+                        "type": "功能性",
+                        "issue": "useEffect可能缺少清理函数",
+                        "location": "useEffect",
+                        "risk": "可能导致内存泄漏",
+                        "suggestion": "返回清理函数：`useEffect(() => { ... return () => cleanup() }, [])`"
+                    })
+            
+            # Props解构
+            if "props." in diff and "const {" not in diff:
+                optimization_issues.append({
+                    "type": "可读性",
+                    "issue": "建议解构props",
+                    "location": "组件参数",
+                    "risk": "频繁使用props.xxx降低可读性",
+                    "suggestion": "解构使用：`const { userId, userName } = props`"
+                })
+            
+            # Key属性
+            if ".map(" in diff and "key=" not in diff:
+                blocking_issues.append({
+                    "type": "功能性",
+                    "issue": "React列表渲染缺少key属性",
+                    "location": "map渲染",
+                    "risk": "可能导致React渲染错误和性能问题",
+                    "suggestion": "添加唯一key：`items.map(item => <div key={item.id}>...</div>)`"
+                })
+            
+            advantages.append("使用React框架，组件化思维")
+        
+        # ===== CSS/样式相关检查 =====
+        if ".css" in diff or ".scss" in diff or ".less" in diff or "<style" in diff:
+            # !important使用
+            if "!important" in diff:
+                optimization_issues.append({
+                    "type": "可维护性",
+                    "issue": "使用了!important",
+                    "location": "CSS样式",
+                    "risk": "降低样式可维护性，难以覆盖",
+                    "suggestion": "提高选择器优先级或使用CSS Modules替代"
+                })
+            
+            # 内联样式
+            if "style=\"" in diff or "style='" in diff or "style={{" in diff:
+                optimization_issues.append({
+                    "type": "可维护性",
+                    "issue": "包含内联样式",
+                    "location": "JSX/模板",
+                    "risk": "样式分散，难以统一管理",
+                    "suggestion": "移到CSS文件、CSS Modules或styled-components"
+                })
+            
+            # class vs className
+            if "class=" in diff and ".jsx" in diff:
+                blocking_issues.append({
+                    "type": "功能性",
+                    "issue": "JSX中使用了class而非className",
+                    "location": "JSX属性",
+                    "risk": "class是JavaScript保留字，会导致语法错误",
+                    "suggestion": "使用className：`<div className=\"container\">`"
+                })
+        
+        # ===== JavaScript/TypeScript通用检查 =====
+        # var使用
+        if "var " in diff:
+            optimization_issues.append({
+                "type": "代码质量",
+                "issue": "使用了var声明变量",
+                "location": "变量声明",
+                "risk": "var有作用域提升问题，let/const更安全",
+                "suggestion": "使用let（可变）或const（不可变）替代var"
+            })
+        
+        # == vs ===
+        if " == " in diff or " != " in diff:
+            optimization_issues.append({
+                "type": "代码质量",
+                "issue": "使用了弱相等(==)",
+                "location": "比较操作",
+                "risk": "可能发生类型转换，导致意外结果",
+                "suggestion": "使用强相等(===)避免类型转换"
+            })
+        
+        # console.log
+        if "console.log" in diff:
+            optimization_issues.append({
+                "type": "代码质量",
+                "issue": "包含console.log调试语句",
+                "location": "调试代码",
+                "risk": "生产环境不应包含调试日志",
+                "suggestion": "移除或使用条件编译：`if (process.env.DEBUG) console.log(...)`"
+            })
+        
+        # TODO/FIXME
+        if "TODO" in diff or "FIXME" in diff:
+            optimization_issues.append({
+                "type": "可维护性",
+                "issue": "代码中包含TODO/FIXME标记",
+                "location": "注释",
+                "risk": "可能遗漏未完成的工作",
+                "suggestion": "创建Issue跟踪，或及时处理"
+            })
+        
+        # 硬编码URL
+        if "http://" in diff or "https://" in diff:
+            optimization_issues.append({
+                "type": "可维护性",
+                "issue": "包含URL硬编码",
+                "location": "API调用/资源引用",
+                "risk": "环境切换时需要修改代码",
+                "suggestion": "移到配置文件或环境变量：`const API_URL = process.env.API_BASE_URL`"
+            })
+        
+        # import顺序
+        import_lines = [line for line in diff.split('\n') if 'import ' in line]
+        if len(import_lines) > 3:
+            optimization_issues.append({
+                "type": "代码风格",
+                "issue": "import语句较多，建议按规范分组",
+                "location": "import声明",
+                "risk": "影响代码可读性",
+                "suggestion": "按规范排序：第三方库 -> 组件 -> 工具函数 -> 样式"
+            })
+        
+        # 代码变更大小
+        if len(diff) > 5000:
+            optimization_issues.append({
+                "type": "可维护性",
+                "issue": f"代码变更较大（{len(diff)}字符）",
+                "location": "整体MR",
+                "risk": "大MR难以审查，容易引入bug",
+                "suggestion": "建议拆分成多个小MR，每个MR专注单一功能"
+            })
+        
+        # ===== 测试相关检查 =====
+        if "test" in diff.lower() or "spec" in diff.lower():
+            advantages.append("包含了测试代码，值得称赞")
+            
+            if "describe" in diff or "test(" in diff or "it(" in diff:
+                advantages.append("使用了测试框架，保证代码质量")
+        
+        # ===== 文档注释检查 =====
+        if '"""' in diff or "'''" in diff or "/**" in diff:
+            advantages.append("代码包含文档注释，有利于团队协作")
+        
+        # ===== 性能优化建议 =====
+        if "forEach" in diff and "map" in diff:
+            optimization_issues.append({
+                "type": "性能",
+                "issue": "forEach和map混用",
+                "location": "数组操作",
+                "risk": "forEach不返回值，可能不是预期行为",
+                "suggestion": "如需转换数据用map，如需遍历用forEach"
+            })
+        
+        if "async" in diff and "await" not in diff:
+            optimization_issues.append({
+                "type": "代码质量",
+                "issue": "函数标记为async但未使用await",
+                "location": "函数定义",
+                "risk": "可能是误标记，或遗漏await",
+                "suggestion": "检查是否需要await，或移除async标记"
+            })
+        
+        # ===== 现代前端特性 =====
+        if "?. " in diff or "?.(" in diff or "?? " in diff:
+            advantages.append("使用了可选链和空值合并，代码更简洁安全")
+        
+        if "const " in diff and "let " not in diff:
+            advantages.append("优先使用const声明变量，代码更安全")
+        
+        # 构建专业审查结果
+        review_parts = []
+        
+        # 总体评价（简洁）
+        total_issues = len(blocking_issues) + len(optimization_issues)
+        if total_issues == 0:
+            review_parts.append("## 总体评价")
+            review_parts.append("代码质量良好，未发现明显问题。✅")
+        else:
+            review_parts.append("## 总体评价")
+            if len(blocking_issues) > 0:
+                review_parts.append(f"发现**{len(blocking_issues)}个阻断级问题**需要修复，")
+            if len(optimization_issues) > 0:
+                review_parts.append(f"**{len(optimization_issues)}个优化建议**供参考。")
+            review_parts.append("建议优先处理阻断级问题后再合并。")
+        
+        # 阻断级问题（功能性/安全性/性能）
+        if blocking_issues:
+            review_parts.append("\n## 🔴 阻断级问题（必须修复）")
+            for i, issue in enumerate(blocking_issues, 1):
+                # 提取具体代码信息
+                line_info = extract_line_info(diff, issue)
+                if line_info:
+                    review_parts.append(f"\n### {i}. {issue['type']}：{issue['issue']}")
+                    review_parts.append(f"**位置**: `{line_info['file']}` 第{line_info['line']}行")
+                    review_parts.append(f"**代码**: `{line_info['code']}`")
+                else:
+                    review_parts.append(f"\n### {i}. {issue['type']}：{issue['issue']}")
+                review_parts.append(f"- **风险**: {issue['risk']}")
+                review_parts.append(f"- **修改建议**: {issue['suggestion']}")
+        
+        # 优化级问题（代码风格/可读性/可维护性）
+        if optimization_issues:
+            review_parts.append("\n## 💡 优化建议（建议改进）")
+            for i, issue in enumerate(optimization_issues, 1):
+                # 提取具体代码信息
+                line_info = extract_line_info(diff, issue)
+                if line_info:
+                    review_parts.append(f"\n### {i}. {issue['type']}：{issue['issue']}")
+                    review_parts.append(f"**位置**: `{line_info['file']}` 第{line_info['line']}行")
+                    review_parts.append(f"**代码**: `{line_info['code']}`")
+                else:
+                    review_parts.append(f"\n### {i}. {issue['type']}：{issue['issue']}")
+                review_parts.append(f"- **说明**: {issue['risk']}")
+                review_parts.append(f"- **修改建议**: {issue['suggestion']}")
+        
+        # 如果没有任何发现
+        if not blocking_issues and not optimization_issues:
+            review_parts.append("\n## 说明")
+            review_parts.append("代码变更较小，未发现明显问题。保持良好的编码习惯！")
+        
+        review_result = "\n".join(review_parts)
+
+        feishu_msg = f"""🔍 **代码审查报告**
+
+📦 项目：{project}
+👤 提交者：{user}
+📋 MR：{mr_title}
+
+---
+
+{review_result}
+
+💡 *本评论由小K的代码审查系统自动生成*"""
+
+        gitlab_comment = f"""## 🔍 AI代码审查
+
+**项目**: {project}  
+**提交者**: {user}  
+**MR**: {mr_title}
+
+---
+
+{review_result}
+
+---
+
+*本评论由小K的代码审查系统自动生成*"""
+
+        return feishu_msg, gitlab_comment
+
+    except Exception as e:
+        logger.error(f"Code review error: {e}")
+        feishu_msg = f"⚠️ **代码审查失败**\n\n审查过程中出现错误：{str(e)}"
+        gitlab_comment = f"## ⚠️ 代码审查失败\n\n审查过程中出现错误：{str(e)}"
+        return feishu_msg, gitlab_comment
+
+async def handle_push_event(data: dict):
+    """处理Push事件"""
+    project = data.get('project', {}).get('name', 'Unknown')
+    ref = data.get('ref', '')
+    user = data.get('user_name', 'Unknown')
+    commits = data.get('total_commits_count', 0)
+
+    logger.info(f"Push event: {user} pushed {commits} commits to {ref} in {project}")
+
+async def handle_merge_request_event(data: dict):
+    """处理Merge Request事件"""
+    mr = data.get('object_attributes', {})
+    action = mr.get('action', 'Unknown')
+    title = mr.get('title', 'Unknown')
+    user = data.get('user', {}).get('name', 'Unknown')
+    project = data.get('project', {})
+    project_id = project.get('id')
+    project_name = project.get('name', 'Unknown')
+    mr_iid = mr.get('iid')
+
+    logger.info(f"MR event: {user} {action} MR: {title}")
+
+    # 只对新的MR（open action）进行代码审查
+    if action == 'open' and mr_iid:
+        logger.info(f"Starting code review for MR {mr_iid}")
+        try:
+            # 获取代码diff
+            diff = get_gitlab_diff(project_id, mr_iid)
+
+            if diff:
+                # 进行代码审查
+                feishu_msg, gitlab_comment = await code_review(diff, title, user, project_name)
+
+                # 发送审查结果到飞书
+                send_raw_feishu_message(feishu_msg)
+                logger.info(f"Code review sent to Feishu for MR {mr_iid}")
+
+                # 自动回复到GitLab MR评论区
+                success = post_gitlab_mr_comment(project_id, mr_iid, gitlab_comment)
+                if success:
+                    logger.info(f"Code review posted to GitLab MR {mr_iid}")
+                else:
+                    logger.error(f"Failed to post review to GitLab MR {mr_iid}")
+            else:
+                logger.warning(f"Failed to get diff for MR {mr_iid}")
+
+        except Exception as e:
+            logger.error(f"Error during code review: {e}")
+
+async def handle_tag_push_event(data: dict):
+    """处理Tag Push事件"""
+    project = data.get('project', {}).get('name', 'Unknown')
+    ref = data.get('ref', '')
+    user = data.get('user_name', 'Unknown')
+
+    logger.info(f"Tag push event: {user} pushed tag {ref} in {project}")
+
+async def handle_pipeline_event(data: dict):
+    """处理Pipeline事件"""
+    pipeline = data.get('object_attributes', {})
+    status = pipeline.get('status', 'Unknown')
+    source = pipeline.get('source', 'Unknown')
+
+    logger.info(f"Pipeline event: Pipeline {status} from {source}")
+
+def extract_line_info(diff: str, issue: dict) -> dict:
+    """
+    从diff中提取问题相关的代码行信息
+    返回: {file: str, line: int, code: str} 或 None
+    """
+    try:
+        lines = diff.split('\n')
+        current_file = None
+        current_line = 0
+        
+        for i, line in enumerate(lines):
+            # 解析diff文件头
+            if line.startswith('+++ b/'):
+                current_file = line[6:].strip()
+                current_line = 0
+                continue
+            
+            # 解析diff位置信息 @@ -start,count +start,count @@
+            if line.startswith('@@'):
+                match = re.search(r'\+(\d+)', line)
+                if match:
+                    current_line = int(match.group(1))
+                continue
+            
+            # 跳过其他diff头部
+            if line.startswith('diff --git') or line.startswith('index ') or line.startswith('---'):
+                continue
+            
+            # 检查具体的代码问题
+            if not line.startswith(('+', '-')):
+                # 不是新增或删除的行，跳过
+                if current_line > 0:
+                    current_line += 1
+                continue
+            
+            # 提取实际代码（去掉+/-符号）
+            code_line = line[1:].strip() if len(line) > 1 else ""
+            
+            # 根据问题类型精确匹配
+            is_problem = False
+            
+            if issue['type'] == '代码质量' and 'console.log' in issue['issue']:
+                if 'console.log' in code_line:
+                    is_problem = True
+            
+            elif issue['type'] == '代码质量' and 'var ' in issue['issue']:
+                # 检查是否以var开头（var后跟空格）
+                if code_line.startswith('var '):
+                    is_problem = True
+            
+            elif issue['type'] == '代码质量' and '==' in issue['issue']:
+                if ' == ' in code_line or ' != ' in code_line:
+                    is_problem = True
+            
+            elif issue['type'] == '安全性' and 'XSS' in issue['issue']:
+                if 'innerHTML' in code_line or 'dangerouslySetInnerHTML' in code_line:
+                    is_problem = True
+            
+            elif issue['type'] == '安全性' and '敏感信息' in issue['issue']:
+                if any(kw in code_line.lower() for kw in ['password', 'secret', 'token', 'api_key']):
+                    if '=' in code_line and any(q in code_line for q in ['"', "'"]):
+                        is_problem = True
+            
+            elif issue['type'] == '功能性' and 'v-for' in issue['issue']:
+                if 'v-for' in code_line and 'key=' not in code_line and ':key' not in code_line:
+                    is_problem = True
+            
+            elif issue['type'] == '功能性' and 'name属性' in issue['issue']:
+                if 'export default' in code_line and current_file and current_file.endswith('.vue'):
+                    # 检查后续几行是否有name
+                    has_name = False
+                    for j in range(i+1, min(i+10, len(lines))):
+                        if 'name:' in lines[j]:
+                            has_name = True
+                            break
+                        if lines[j].startswith('@@') or lines[j].startswith('+++'):
+                            break
+                    if not has_name:
+                        is_problem = True
+            
+            elif issue['type'] == '可维护性' and 'TODO' in issue['issue']:
+                if 'TODO' in code_line or 'FIXME' in code_line:
+                    is_problem = True
+            
+            elif issue['type'] == '可维护性' and '!important' in issue['issue']:
+                if '!important' in code_line:
+                    is_problem = True
+            
+            elif issue['type'] == '可维护性' and '硬编码' in issue['issue']:
+                if 'http://' in code_line or 'https://' in code_line:
+                    is_problem = True
+            
+            # 如果找到问题，返回详细信息
+            if is_problem and current_file and current_line > 0:
+                # 限制代码长度
+                display_code = code_line if len(code_line) <= 80 else code_line[:80] + "..."
+                return {
+                    'file': current_file,
+                    'line': current_line,
+                    'code': display_code
+                }
+            
+            # 更新行号
+            if line.startswith('+') and not line.startswith('+++'):
+                current_line += 1
+        
+        return None
+        
+    except Exception as e:
+        logger.warning(f"Failed to extract line info: {e}")
+        return None
+
+def send_raw_feishu_message(message: str):
+    """直接发送飞书消息（用于代码审查结果）"""
+    try:
+        # 设置完整的环境变量
+        env = os.environ.copy()
+        env['PATH'] = '/root/.nvm/versions/node/v22.22.0/bin:' + env.get('PATH', '')
+        env['NVM_DIR'] = '/root/.nvm'
+
+        # 使用绝对路径调用OpenClaw
+        openclaw_path = '/root/.nvm/versions/node/v22.22.0/bin/openclaw'
+        result = subprocess.run(
+            [openclaw_path, 'message', 'send',
+             '--channel', 'feishu',
+             '--account', 'xiaok',
+             '--target', f'user:{FEISHU_TARGET_USER}',
+             '--message', message],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=env
+        )
+        if result.returncode == 0:
+            logger.info(f"Raw Feishu message sent successfully")
+        else:
+            logger.error(f"Raw Feishu message failed: {result.stderr}")
+    except subprocess.TimeoutExpired:
+        logger.error("Raw Feishu message timeout")
+    except Exception as e:
+        logger.error(f"Failed to send raw Feishu message: {str(e)}")
+
+if __name__ == "__main__":
+    logger.info("=" * 60)
+    logger.info("GitLab Webhook Server v2.0.0 starting...")
+    logger.info("Features:")
+    logger.info("  - 接收GitLab webhook事件")
+    logger.info("  - 自动获取MR diff")
+    logger.info("  - AI代码审查")
+    logger.info("  - 飞书通知")
+    logger.info("  - 自动回复到GitLab MR评论区")
+    logger.info("=" * 60)
+
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8888,
+        log_level="info"
+    )

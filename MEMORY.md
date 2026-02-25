@@ -387,9 +387,15 @@ export async function probeFeishu(cfg?: FeishuConfig): Promise<FeishuProbeResult
 
 ### 2026年2月
 - ✅ Stock-Quick 项目 MVP 完成
+- ✅ **股票详情页面开发完成**（2026-02-16）
+- ✅ **K线图表组件实现**（Canvas绘制，345行代码）
+- ✅ **WebSocket实时推送完成**（后端+前端完整实现）
+- ✅ **技术债务清理**（合并重复服务文件）
 - ✅ OpenClaw 定时任务集成
 - ✅ 智谱 API 配置（GLM-4.7）
 - ✅ 前端开发学习（uni-app + Vue3）
+- ✅ 新增代码约1500+行
+- ✅ 使用Claude Code开发2个会话，约100分钟
 
 ### 正在学习
 - 前端框架高级特性
@@ -416,6 +422,7 @@ export async function probeFeishu(cfg?: FeishuConfig): Promise<FeishuProbeResult
 
 ## 📅 重要日期和事件
 
+- 2026-02-16: Stock-Quick项目重大进展 - 完成股票详情页面、K线图表、WebSocket实时推送
 - 2026-02-11: 阅读OpenClaw使用技巧文档，验证并完善配置体系
 - 2026-02-09: 完成配置文件优化（SOUL.md, USER.md, AGENT.md, MEMORY.md）
 - 2026-02-07: 发现飞书 API 消耗问题
@@ -777,7 +784,84 @@ python3 /root/.openclaw/scripts/baidu-search.py "搜索关键词" 10
 
 ---
 
-*最后更新: 2026-02-11 17:30*
+## 🚀 Stock-Quick项目开发经验（2026-02-16）
+
+### Claude Code开发模式
+**使用Wingman脚本自动化开发：**
+```bash
+~/code/claude-code-wingman/claude-wingman.sh \
+  --session <session-name> \
+  --workdir /root/code/stock-quick \
+  --prompt "<task description>"
+```
+
+**开发统计：**
+- 会话1: 股票详情页面（40分钟）
+- 会话2: WebSocket实时推送（60分钟）
+- 总计: 2个会话，约100分钟
+- 成果: 新增约1500行代码，8个新文件
+
+**关键经验：**
+1. **授权处理**: 需要耐心等待CC的授权请求
+2. **监控方式**: 使用tmux capture-pane监控进度
+3. **长时间任务**: 注意checkpoint和进度保存
+4. **调试问题**: CC会持续调试直到解决
+
+### WebSocket实时推送架构
+
+**后端实现：**
+- WebSocketConnectionManager: 连接池管理
+- StockPricePusher: 5秒推送一次价格
+- 心跳检测: 30秒间隔
+- 订阅管理: 按股票代码订阅
+
+**前端实现：**
+- WebSocket工具类: 自动重连（指数退避）
+- Pinia状态管理: 连接状态、实时价格缓存
+- 页面集成: 股票详情页、自选股页面
+
+**消息协议：**
+```json
+// 订阅
+{"action": "subscribe", "symbols": [{"symbol": "000001", "market": "A"}]}
+
+// 行情推送
+{
+  "type": "quote_update",
+  "symbol": "000001",
+  "data": {"current": 10.50, "change": 0.15}
+}
+```
+
+### 开发最佳实践
+
+**技术债务管理：**
+- ✅ 及时合并重复代码
+- ✅ 统一命名规范
+- ✅ 清理遗留引用
+- ✅ 保持代码整洁
+
+**类型系统：**
+- 使用TypeScript定义完整类型
+- 前后端类型保持一致
+- 便于开发和维护
+
+**测试策略：**
+- 编写测试脚本（test_websocket.py）
+- 验证核心功能
+- 调试问题时查看日志
+
+### 后续优化方向
+
+1. **数据库持久化** - 替换内存存储
+2. **异步API改造** - 优化akshare调用
+3. **K线图表增强** - 集成专业图表库
+4. **技术指标** - 添加MACD、KDJ、RSI
+5. **性能优化** - 减少不必要的更新
+
+---
+
+*最后更新: 2026-02-16 10:30*
 *今日记忆: memory/2026-02-11.md*
 
 ---

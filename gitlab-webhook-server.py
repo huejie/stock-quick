@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """
-GitLab Webhook接收服务
+GitLab Webhook接收服务 v3.0
 用于接收GitLab的push、merge request等事件，并进行代码审查
 - 接收MR事件
 - 获取代码diff
-- 通过Claude Code进行代码审查
+- 使用智能代码审查系统（v3.0）
 - 将审查结果发送到飞书
 - 自动回复到GitLab MR评论区
+
+优化点（v3.0）：
+- 问题归类：相同问题合并显示
+- 精确定位：显示文件名和行号
+- 代码片段：显示问题代码
+- 更清晰的报告格式
 """
 
 from fastapi import FastAPI, Request, Header, HTTPException
@@ -43,7 +49,7 @@ FEISHU_TARGET_USER = "ou_032db2f8e45df3e207b2ea3a0563df9c"
 
 # GitLab配置
 GITLAB_URL = "https://git.iec.io"
-GITLAB_TOKEN = "glpat-PXwUZPoBJCzCTLPehb6HXm86MQp1OjJtbgk.01.0z0wr6brq"
+GITLAB_TOKEN = "glpat-hO7Kq5QZ-F_5pHpbWsNG9W86MQp1OjJuMgk.01.0z0zuoear"
 
 def verify_signature(payload: bytes, signature: str, secret: str) -> bool:
     """验证GitLab webhook签名"""
@@ -138,9 +144,20 @@ def get_gitlab_diff(project_id: int, mr_iid: int) -> str:
 
         if response.status_code == 200:
             diffs = response.json()
-            # 提取所有diff内容
+            # 提取所有diff内容，并添加文件信息
             diff_text = ""
             for diff in diffs:
+                # GitLab API返回的diff可能没有diff --git头部
+                # 需要从diff对象中提取文件信息
+                old_path = diff.get('old_path', '')
+                new_path = diff.get('new_path', '')
+                
+                # 构造完整的diff格式
+                if new_path:
+                    diff_text += f"diff --git a/{new_path} b/{new_path}\n"
+                    diff_text += f"--- a/{old_path}\n"
+                    diff_text += f"+++ b/{new_path}\n"
+                
                 diff_text += diff.get('diff', '') + "\n\n"
 
             # 限制diff长度
@@ -221,6 +238,10 @@ def run_claude_code_review(prompt: str) -> str:
 
         logger.info(f"Process returncode: {process.returncode}")
         logger.info(f"Process timeout: {'yes' if process.returncode is None else 'no'}")
+        
+        # 输出stderr用于调试
+        if process.stderr:
+            logger.error(f"Process stderr: {process.stderr[:500]}")
 
         if process.returncode == 0:
             output = process.stdout
@@ -238,7 +259,7 @@ def run_claude_code_review(prompt: str) -> str:
                     output = stderr
                 else:
                     logger.warning(f"Both stdout and stderr are empty or too short")
-                    return "Claude Code无输出，可能prompt太短或模型响应为空。"
+                    return f"Claude Code无输出，可能prompt太短或模型响应为空。Stderr: {stderr[:200] if stderr else 'None'}"
 
             # 过滤掉Claude Code的UI输出，只保留实际内容
             review_lines = []
@@ -288,9 +309,11 @@ def run_claude_code_review(prompt: str) -> str:
         logger.error(f"Claude Code review error: {e}")
         return f"审查失败: {str(e)}"
 
+
+
 async def code_review(diff: str, mr_title: str, user: str, project: str) -> tuple[str, str]:
     """
-    使用Claude Code进行代码审查
+    使用JavaScript代码审查脚本进行代码审查（5分钟超时）
 
     参数:
         diff: 代码diff
@@ -303,56 +326,99 @@ async def code_review(diff: str, mr_title: str, user: str, project: str) -> tupl
     """
     if not diff:
         feishu_msg = f"⚠️ **代码审查失败**\n\n无法获取代码diff，跳过审查。"
-        gitlab_comment = "⚠️ 代码审查失败\n\n无法获取代码diff，跳过审查。"
+        gitlab_comment = "## ⚠️ 代码审查失败\n\n无法获取代码diff，跳过审查。"
         return feishu_msg, gitlab_comment
 
     try:
-        # 构造审查提示词
-        review_prompt = f"""请对以下代码进行质量审查，重点关注：
+        # 使用新版审查脚本（v3.0，问题归类）
+        logger.info(f"Starting code review for diff length: {len(diff)}")
+        result = subprocess.run(
+            ['python3', '/root/.openclaw/workspace/js-code-reviewer-v3.py', diff],
+            capture_output=True,
+            text=True,
+            timeout=300  # 5分钟
+        )
+        
+        logger.info(f"Review script returncode: {result.returncode}")
+        if result.returncode != 0:
+            logger.error(f"Review script stderr: {result.stderr[:500]}")
+        
+        if result.returncode == 0 and result.stdout:
+            review_result = result.stdout.strip()
+            logger.info(f"Review result length: {len(review_result)}")
+            
+            # 统计问题数量
+            blocking_count = review_result.count('🔴')
+            optimization_count = review_result.count('💡')
+            
+            # 根据问题数量添加不同emoji
+            if blocking_count > 0:
+                status_emoji = "🔴"
+                status_text = f"发现{blocking_count}个阻断级问题"
+            elif optimization_count > 0:
+                status_emoji = "💡"
+                status_text = f"发现{optimization_count}个优化建议"
+            else:
+                status_emoji = "✅"
+                status_text = "代码质量良好"
+            
+            feishu_msg = f"""🔍 **代码审查报告** {status_emoji}
 
-**审查维度：**
-1. 代码质量（命名、结构、可读性）
-2. 潜在bug和逻辑问题
-3. 性能优化建议
-4. 安全问题
-5. 最佳实践
+📦 项目：{project}
+👤 提交者：{user}
+📋 MR：{mr_title}
+📊 状态：{status_text}
 
-**MR信息：**
-- 项目：{project}
-- 用户：{user}
-- 标题：{mr_title}
+---
 
-**代码diff：**
-```diff
-{diff}
-```
+{review_result}
 
-请以结构化的方式输出审查结果，包括：
-- 总体评价（1句话）
-- 发现的问题（列表形式，每个问题说明原因和改进建议）
-- 优点（可选）
+💡 *本评论由小K代码审查系统v3.0自动生成（问题归类版）*"""
 
-保持简洁专业，不超过300字。"""
+            gitlab_comment = f"""## 🔍 代码审查报告 {status_emoji}
 
-        # 使用Claude Code进行代码审查
-        review_result = run_claude_code_review(review_prompt)
+**项目**: {project}  
+**提交者**: {user}  
+**MR**: {mr_title}  
+**状态**: {status_text}
 
-        # 简化审查流程
-        if review_result and "Claude Code" not in review_result and "超时" not in review_result and "失败" not in review_result:
-            feishu_msg = f"🔍 **代码审查报告**\n\n📦 项目：{project}\n👤 提交者：{user}\n📋 MR：{mr_title}\n\n---\n\n{review_result}\n\n💡 *本评论由AI代码审查助手自动生成*"
-            gitlab_comment = f"## 🔍 AI代码审查\n\n**项目**: {project}  \n**提交者**: {user}  \n**MR**: {mr_title}\n\n---\n\n{review_result}\n\n---\n\n*本评论由AI代码审查助手自动生成，如有问题请联系管理员*"
+---
+
+{review_result}
+
+---
+
+*本评论由小K代码审查系统v3.0自动生成（问题归类版）*"""
+
+            return feishu_msg, gitlab_comment
         else:
-            # 审查失败的情况
-            feishu_msg = f"📋 **代码审查通知**\n\n📦 项目：{project}\n👤 提交者：{user}\n📋 MR：{mr_title}\n\n💡 AI审查暂时不可用，请手动进行代码审查。"
-            gitlab_comment = f"## 📋 代码审查通知\n\nAI审查服务暂时不可用，请手动进行代码审查。"
+            error_msg = result.stderr if result.stderr else "审查脚本执行失败"
+            logger.error(f"Code review script failed: {error_msg}")
+            
+            feishu_msg = f"""📋 **代码审查通知**
 
-        return feishu_msg, gitlab_comment
+📦 项目：{project}
+👤 提交者：{user}
+📋 MR：{mr_title}
+
+⚠️ 代码审查服务暂时不可用，请手动进行代码审查。
+
+错误信息：{error_msg}"""
+
+            gitlab_comment = f"""## 📋 代码审查通知
+
+代码审查服务暂时不可用，请手动进行代码审查。
+
+**错误信息**: {error_msg}"""
+
+            return feishu_msg, gitlab_comment
 
     except Exception as e:
         logger.error(f"Code review error: {e}")
         feishu_msg = f"⚠️ **代码审查失败**\n\n审查过程中出现错误：{str(e)}"
         gitlab_comment = f"## ⚠️ 代码审查失败\n\n审查过程中出现错误：{str(e)}"
         return feishu_msg, gitlab_comment
+
 
 async def handle_push_event(data: dict):
     """处理Push事件"""
@@ -419,6 +485,118 @@ async def handle_pipeline_event(data: dict):
 
     logger.info(f"Pipeline event: Pipeline {status} from {source}")
 
+def extract_line_info(diff: str, issue: dict) -> dict:
+    """
+    从diff中提取问题相关的代码行信息
+    返回: {file: str, line: int, code: str} 或 None
+    """
+    try:
+        lines = diff.split('\n')
+        current_file = None
+        current_line = 0
+        
+        for i, line in enumerate(lines):
+            # 解析diff文件头
+            if line.startswith('+++ b/'):
+                current_file = line[6:].strip()
+                current_line = 0
+                continue
+            
+            # 解析diff位置信息 @@ -start,count +start,count @@
+            if line.startswith('@@'):
+                match = re.search(r'\+(\d+)', line)
+                if match:
+                    current_line = int(match.group(1))
+                continue
+            
+            # 跳过其他diff头部
+            if line.startswith('diff --git') or line.startswith('index ') or line.startswith('---'):
+                continue
+            
+            # 检查具体的代码问题
+            if not line.startswith(('+', '-')):
+                # 不是新增或删除的行，跳过
+                if current_line > 0:
+                    current_line += 1
+                continue
+            
+            # 提取实际代码（去掉+/-符号）
+            code_line = line[1:].strip() if len(line) > 1 else ""
+            
+            # 根据问题类型精确匹配
+            is_problem = False
+            
+            if issue['type'] == '代码质量' and 'console.log' in issue['issue']:
+                if 'console.log' in code_line:
+                    is_problem = True
+            
+            elif issue['type'] == '代码质量' and 'var ' in issue['issue']:
+                # 检查是否以var开头（var后跟空格）
+                if code_line.startswith('var '):
+                    is_problem = True
+            
+            elif issue['type'] == '代码质量' and '==' in issue['issue']:
+                if ' == ' in code_line or ' != ' in code_line:
+                    is_problem = True
+            
+            elif issue['type'] == '安全性' and 'XSS' in issue['issue']:
+                if 'innerHTML' in code_line or 'dangerouslySetInnerHTML' in code_line:
+                    is_problem = True
+            
+            elif issue['type'] == '安全性' and '敏感信息' in issue['issue']:
+                if any(kw in code_line.lower() for kw in ['password', 'secret', 'token', 'api_key']):
+                    if '=' in code_line and any(q in code_line for q in ['"', "'"]):
+                        is_problem = True
+            
+            elif issue['type'] == '功能性' and 'v-for' in issue['issue']:
+                if 'v-for' in code_line and 'key=' not in code_line and ':key' not in code_line:
+                    is_problem = True
+            
+            elif issue['type'] == '功能性' and 'name属性' in issue['issue']:
+                if 'export default' in code_line and current_file and current_file.endswith('.vue'):
+                    # 检查后续几行是否有name
+                    has_name = False
+                    for j in range(i+1, min(i+10, len(lines))):
+                        if 'name:' in lines[j]:
+                            has_name = True
+                            break
+                        if lines[j].startswith('@@') or lines[j].startswith('+++'):
+                            break
+                    if not has_name:
+                        is_problem = True
+            
+            elif issue['type'] == '可维护性' and 'TODO' in issue['issue']:
+                if 'TODO' in code_line or 'FIXME' in code_line:
+                    is_problem = True
+            
+            elif issue['type'] == '可维护性' and '!important' in issue['issue']:
+                if '!important' in code_line:
+                    is_problem = True
+            
+            elif issue['type'] == '可维护性' and '硬编码' in issue['issue']:
+                if 'http://' in code_line or 'https://' in code_line:
+                    is_problem = True
+            
+            # 如果找到问题，返回详细信息
+            if is_problem and current_file and current_line > 0:
+                # 限制代码长度
+                display_code = code_line if len(code_line) <= 80 else code_line[:80] + "..."
+                return {
+                    'file': current_file,
+                    'line': current_line,
+                    'code': display_code
+                }
+            
+            # 更新行号
+            if line.startswith('+') and not line.startswith('+++'):
+                current_line += 1
+        
+        return None
+        
+    except Exception as e:
+        logger.warning(f"Failed to extract line info: {e}")
+        return None
+
 def send_raw_feishu_message(message: str):
     """直接发送飞书消息（用于代码审查结果）"""
     try:
@@ -432,6 +610,7 @@ def send_raw_feishu_message(message: str):
         result = subprocess.run(
             [openclaw_path, 'message', 'send',
              '--channel', 'feishu',
+             '--account', 'xiaok',
              '--target', f'user:{FEISHU_TARGET_USER}',
              '--message', message],
             capture_output=True,

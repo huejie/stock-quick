@@ -1,26 +1,20 @@
 {
-  "信维通信": {
-    "shares": 100,
-    "cost": 75.11,
-    "market": "A",
-    "symbol": "002136"
-  },
   "中文在线": {
     "shares": 400,
     "cost": 38.96,
     "market": "A",
     "symbol": "300794"
   },
-  "茅 台": {
-    "shares": 600,
-    "cost": 19.30,
-    "market": "A",
-    "symbol": "600519"
-  },
   "网宿科技": {
     "shares": 900,
     "cost": 15.73,
     "market": "A",
     "symbol": "300017"
+  },
+  "蓝色光标": {
+    "shares": 500,
+    "cost": 19.844,
+    "market": "A",
+    "symbol": "300058"
   }
 }
